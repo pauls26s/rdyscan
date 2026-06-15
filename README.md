@@ -31,6 +31,8 @@ Batch scan (`node src/batch.mjs urls.txt`) of 102 specialty-coffee storefronts (
 ```bash
 node src/cli.mjs <store-url>          # pretty report
 node src/cli.mjs <store-url> --json   # machine-readable (for the web tool / CI gate)
+node src/batch.mjs urls.txt            # scan many stores → out/results.csv + out/summary.md
+node src/report.mjs <store-url> reports # generate a client-ready Markdown audit report
 ```
 Exit code: `0` if score ≥ 70, else `1` (so it can gate agency pipelines / CI).
 
