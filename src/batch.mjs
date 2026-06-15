@@ -16,7 +16,8 @@ function parseArgs() {
   const file = a.find((x) => !x.startsWith("--"));
   const conc = Number((a.find((x) => x.startsWith("--concurrency=")) || "").split("=")[1]) || 3;
   const outDir = (a.find((x) => x.startsWith("--out=")) || "").split("=")[1] || "out";
-  return { file, conc, outDir };
+  const delay = Number((a.find((x) => x.startsWith("--delay=")) || "").split("=")[1]) || 600;
+  return { file, conc, outDir, delay };
 }
 
 async function pool(items, n, worker) {
@@ -44,16 +45,16 @@ const pct = (n, d) => (d ? Math.round((n / d) * 100) : 0);
 const csvCell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
 
 (async () => {
-  const { file, conc, outDir } = parseArgs();
+  const { file, conc, outDir, delay } = parseArgs();
   let urls = SAMPLE;
   if (file && existsSync(file)) {
     urls = readFileSync(file, "utf8").split(/\r?\n/).map((s) => s.trim()).filter((s) => s && !s.startsWith("#"));
   }
-  console.log(`Scanning ${urls.length} stores (concurrency ${conc})…`);
+  console.log(`Scanning ${urls.length} stores (concurrency ${conc}, ${delay}ms/host)…`);
 
   const rows = await pool(urls, conc, async (url) => {
     try {
-      const r = await scanStore(url, { timeout: 12000 });
+      const r = await scanStore(url, { timeout: 12000, minHostInterval: delay });
       const c = (id) => r.checks.find((x) => x.id === id) || { score: 0, status: "" };
       return {
         url, ok: true, score: r.score, grade: r.grade, platform: r.platform,

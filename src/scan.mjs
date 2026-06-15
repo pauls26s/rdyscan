@@ -18,9 +18,22 @@ const UA =
 
 // ---------- low-level fetch ----------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Per-host request throttle: keep a minimum gap between requests to the SAME host so a
+// burst of probes (home, robots, products.json, product, sitemap…) doesn't trip WAFs / rate limits.
+const hostLastHit = new Map();
+async function throttleHost(host, minInterval) {
+  const now = Date.now();
+  const next = Math.max(now, (hostLastHit.get(host) || 0) + minInterval);
+  hostLastHit.set(host, next); // reserve the slot — serializes concurrent same-host calls
+  const wait = next - now;
+  if (wait > 0) await sleep(wait);
+}
 
-async function fetchText(url, { timeout = DEFAULT_TIMEOUT, retries = 2 } = {}) {
+async function fetchText(url, { timeout = DEFAULT_TIMEOUT, retries = 2, minHostInterval = 0 } = {}) {
+  let host = "";
+  try { host = new URL(url).hostname; } catch { /* leave blank */ }
   for (let attempt = 0; ; attempt++) {
+    if (minHostInterval && host) await throttleHost(host, minHostInterval);
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), timeout);
     try {
