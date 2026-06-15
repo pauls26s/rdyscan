@@ -206,18 +206,76 @@ function absolutize(href, origin) {
     return null;
   }
 }
+const ASSET_RE = /\.(?:css|js|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|pdf|xml|json)(?:\?|$)/i;
+const PRODUCT_URL_RE = /\/(?:products?|shop\/p|store\/p|p)\/[a-z0-9][a-z0-9._\-%]+/i;
+const NON_PRODUCT_RE = /\/(?:collections?|blogs?|pages?|policies|account|cart|search|apps|sitemap)\b/i;
+// gift cards / merch / subscriptions — skip so we audit a representative product
+const MERCH_RE = /gift|e-?gift|\bcard\b|sample|sticker|merch|t-?shirt|tee|hoodie|sweat|\bhat\b|cap|beanie|mug|tote|bag-clip|subscription/i;
+function looksLikeProductUrl(u) {
+  return PRODUCT_URL_RE.test(u) && !ASSET_RE.test(u) && !NON_PRODUCT_RE.test(u);
+}
 function findProductLinks(html, origin) {
   const links = new Set();
   const re = /href=["']([^"']+)["']/gi;
   let m;
   while ((m = re.exec(html))) {
     const href = m[1];
-    if (/\/products\/[a-z0-9\-_%]+/i.test(href) || /\/product\/[a-z0-9\-_%]+/i.test(href)) {
+    if (looksLikeProductUrl(href)) {
       const abs = absolutize(href, origin);
       if (abs && !/\/products\/?$/i.test(abs)) links.add(abs.split("#")[0].split("?")[0]);
     }
   }
   return [...links];
+}
+function parseLocs(xml) {
+  return [...xml.matchAll(/<loc>\s*([^<]+?)\s*<\/loc>/gi)].map((m) => m[1].replace(/&amp;/g, "&").trim());
+}
+// Walk robots.txt Sitemap: directives + /sitemap.xml (handles sitemap indexes) to find product URLs.
+async function sitemapProductUrls(origin, robotsBody, opts) {
+  const entries = [];
+  if (robotsBody) for (const m of robotsBody.matchAll(/^\s*sitemap:\s*(\S+)/gim)) entries.push(m[1].trim());
+  entries.push(origin + "/sitemap.xml");
+  const seen = new Set();
+  for (const entry of entries) {
+    if (seen.has(entry)) continue;
+    seen.add(entry);
+    const sm = await fetchText(entry, opts);
+    if (!sm.ok) continue;
+    const locs = parseLocs(sm.body);
+    if (/<sitemapindex/i.test(sm.body)) {
+      // prefer product sub-sitemaps (Shopify: sitemap_products_*), then a couple of others
+      const subs = locs.filter((u) => /product/i.test(u)).concat(locs.filter((u) => !/product/i.test(u))).slice(0, 3);
+      const collected = [];
+      for (const sub of subs) {
+        const s2 = await fetchText(sub, opts);
+        if (s2.ok) collected.push(...parseLocs(s2.body));
+        const found = collected.filter(looksLikeProductUrl);
+        if (found.length) return found.slice(0, 3);
+      }
+    } else {
+      const found = locs.filter(looksLikeProductUrl);
+      if (found.length) return found.slice(0, 3);
+    }
+  }
+  return [];
+}
+// Fetch the first collection/category page and pull product links from it.
+async function collectionProductUrls(homeBody, origin, opts) {
+  const colls = [];
+  const re = /href=["']([^"']*\/(?:collections|category|shop)\/[a-z0-9\-_%]+)["']/gi;
+  let m;
+  while ((m = re.exec(homeBody)) && colls.length < 2) {
+    const abs = absolutize(m[1], origin);
+    if (abs) { const clean = abs.split("#")[0].split("?")[0]; if (!colls.includes(clean)) colls.push(clean); }
+  }
+  for (const c of colls) {
+    const res = await fetchText(c, opts);
+    if (res.ok) {
+      const links = findProductLinks(res.body, origin);
+      if (links.length) return links.slice(0, 3);
+    }
+  }
+  return [];
 }
 
 // ---------- scoring helpers ----------
@@ -321,16 +379,33 @@ export async function scanStore(input, opts = {}) {
     });
   }
 
-  // 3) find + fetch a product page — Shopify products.json (any store), homepage links, then sitemap fallback
+  // 3) find + fetch a product page — products.json, homepage links, then sitemap / collection fallbacks
   let productUrl = null;
   let productsJsonOk = false;
-  const productCandidates = [];
+  let productRes = null;
+  let product = null;
+  const tried = new Set();
+  const tryCands = async (cands) => {
+    for (const cand of cands) {
+      if (!cand || tried.has(cand)) continue;
+      tried.add(cand);
+      const res = await fetchText(cand, opts);
+      if (!productRes && res.ok) { productRes = res; productUrl = cand; } // first reachable page → SSR check
+      if (res.ok) {
+        const node = findProductNode(extractJsonLd(res.body));
+        if (node) { product = node; productRes = res; productUrl = cand; return true; } // schema-bearing page wins
+      }
+    }
+    return false;
+  };
+
+  // (a) Shopify products.json (host variants) — definitive Shopify signal; pick a representative product
+  const pjCands = [];
   {
     const host = new URL(origin).hostname.replace(/^www\./, "");
     const proto = new URL(origin).protocol;
     const hostCandidates = [...new Set([`${proto}//www.${host}`, `${proto}//${host}`, origin])];
-    // skip gift cards / merch so we sample a representative product
-    const skip = /gift|e-?gift|\bcard\b|sample|sticker|merch|t-?shirt|tee|hoodie|sweat|\bhat\b|cap|beanie|mug|tote|bag-clip|subscription/i;
+    const skip = MERCH_RE;
     let handle = null;
     for (const o of hostCandidates) {
       const pj = await fetchText(o + "/products.json?limit=20", opts);
@@ -339,43 +414,24 @@ export async function scanStore(input, opts = {}) {
         const j = JSON.parse(pj.body);
         if (j && Array.isArray(j.products) && j.products.length) {
           productsJsonOk = true;
-          if (platform === "custom/unknown") platform = "shopify"; // products.json is a definitive Shopify signal
+          if (platform === "custom/unknown") platform = "shopify";
           const pick = j.products.find((p) => p.handle && !skip.test(p.handle)) || j.products.find((p) => p.handle);
           handle = pick && pick.handle;
           break;
         }
-      } catch { /* not shopify json on this host; try next */ }
+      } catch { /* not shopify json here */ }
     }
-    if (handle) for (const o of hostCandidates) productCandidates.push(`${o}/products/${handle}`);
+    if (handle) for (const o of hostCandidates) pjCands.push(`${o}/products/${handle}`);
   }
-  for (const l of findProductLinks(home.body, origin)) {
-    if (!productCandidates.includes(l)) productCandidates.push(l);
-    if (productCandidates.length >= 6) break;
-  }
-  // sitemap fallback for headless / non-Shopify stores
-  if (!productCandidates.length) {
-    const sm = await fetchText(origin + "/sitemap.xml", opts);
-    if (sm.ok) {
-      let locs = [...sm.body.matchAll(/<loc>([^<]+)<\/loc>/gi)].map((m) => m[1].trim());
-      const subProd = locs.find((u) => /\.xml/i.test(u) && /product/i.test(u));
-      if (subProd) {
-        const s2 = await fetchText(subProd, opts);
-        if (s2.ok) locs = [...s2.body.matchAll(/<loc>([^<]+)<\/loc>/gi)].map((m) => m[1].trim());
-      }
-      const prod = locs.find((u) => /\/products?\//i.test(u));
-      if (prod) productCandidates.push(prod);
-    }
-  }
-  let productRes = null;
-  let product = null;
-  for (const cand of productCandidates) {
-    const res = await fetchText(cand, opts);
-    if (!productRes && res.ok) { productRes = res; productUrl = cand; } // keep first reachable page for SSR check
-    if (res.ok) {
-      const node = findProductNode(extractJsonLd(res.body));
-      if (node) { product = node; productRes = res; productUrl = cand; break; } // first page with real schema wins
-    }
-  }
+
+  // (b) homepage links; escalate to sitemap, then collection pages, only if no product page was reached
+  const homeCands = findProductLinks(home.body, origin)
+    .sort((a, b) => Number(MERCH_RE.test(a)) - Number(MERCH_RE.test(b)))
+    .slice(0, 6);
+  await tryCands([...pjCands, ...homeCands]);
+  if (!productUrl) await tryCands(await sitemapProductUrls(origin, robotsRes.body, opts));
+  if (!productUrl) await tryCands(await collectionProductUrls(home.body, origin, opts));
+
   if (productUrl) { try { origin = new URL(productUrl).origin; } catch { /* keep */ } }
 
   // 4) product schema completeness

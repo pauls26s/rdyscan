@@ -20,12 +20,12 @@ WARN [#####-----]  5/10  Operational legibility           — shipping policy no
 TOP FIX: publish structured shipping/returns in Offer.shippingDetails / hasMerchantReturnPolicy
 ```
 
-## Live snapshot — specialty coffee roasters (28 stores, Jun 2026)
-Batch scan (`node src/batch.mjs urls.txt`) of 28 specialty-coffee storefronts:
-- **21 had a discoverable product page** to audit; 7 were headless/custom with no externally-reachable product page (a readiness signal in itself).
-- **Only ~38% of audited pages had complete, agent-ready schema.**
-- **~29% had a live product page with zero JSON-LD** — invisible to ChatGPT/Gemini shopping.
-- Median readiness ≈ 80/100. *(Snapshot; re-run for current numbers — external scans vary slightly.)*
+## Live snapshot — specialty coffee roasters (102 stores, Jun 2026)
+Batch scan (`node src/batch.mjs urls.txt`) of 102 specialty-coffee storefronts (84 Shopify, 5 WooCommerce, 3 Squarespace, 10 custom):
+- **All 102 resolved; 90 had a discoverable product page** to audit. The other 12 were headless/custom/WAF-protected with no externally-reachable product page — a readiness signal in itself.
+- **Only 36% of audited pages had complete, agent-ready schema** (32/90); another 42% had partial schema.
+- **22% had a live product page with zero JSON-LD** (20/90) — invisible to ChatGPT/Gemini shopping, including recognizable names (Intelligentsia, Four Barrel, Wrecking Ball).
+- Median readiness 86/100, but ~32% scored D or F. *(Snapshot; re-run for current numbers — external scans vary slightly.)*
 
 ## Usage
 ```bash
