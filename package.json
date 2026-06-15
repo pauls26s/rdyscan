@@ -1,0 +1,31 @@
+{
+  "name": "agentready",
+  "version": "0.1.0",
+  "description": "Audit an e-commerce store for AI shopping-agent readiness (schema, AI-crawler access, SSR, feeds, legibility).",
+  "type": "module",
+  "bin": {
+    "agentready": "src/cli.mjs"
+  },
+  "exports": {
+    ".": "./src/scan.mjs"
+  },
+  "scripts": {
+    "scan": "node src/cli.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "agentic-commerce",
+    "AEO",
+    "GEO",
+    "ecommerce",
+    "ai-shopping",
+    "schema",
+    "shopify",
+    "woocommerce",
+    "chatgpt-shopping"
+  ],
+  "license": "MIT",
+  "dependencies": {}
+}

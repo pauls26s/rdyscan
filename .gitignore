@@ -1,0 +1,10 @@
+# dependencies (scanner is zero-dep, but keep this for safety)
+node_modules/
+
+# batch output
+out/
+
+# logs / os cruft
+*.log
+.DS_Store
+Thumbs.db
