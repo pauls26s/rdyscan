@@ -230,11 +230,24 @@ function findProductLinks(html, origin) {
 function parseLocs(xml) {
   return [...xml.matchAll(/<loc>\s*([^<]+?)\s*<\/loc>/gi)].map((m) => m[1].replace(/&amp;/g, "&").trim());
 }
-// Walk robots.txt Sitemap: directives + /sitemap.xml (handles sitemap indexes) to find product URLs.
+// From a CONFIRMED product sitemap, URLs may not match generic patterns
+// (e.g. Woo /shop/<cat>/<slug>/) — accept deeper paths, drop listing roots, deprioritize merch.
+function productUrlsFromList(locs, origin) {
+  return locs
+    .filter((u) => {
+      try {
+        const segs = new URL(u).pathname.replace(/\/+$/, "").split("/").filter(Boolean);
+        return segs.length >= 2 && !NON_PRODUCT_RE.test(u) && !ASSET_RE.test(u);
+      } catch { return false; }
+    })
+    .sort((a, b) => Number(MERCH_RE.test(a)) - Number(MERCH_RE.test(b)));
+}
+// Walk robots.txt Sitemap: directives + common sitemaps (handles sitemap indexes) to find product URLs.
 async function sitemapProductUrls(origin, robotsBody, opts) {
   const entries = [];
   if (robotsBody) for (const m of robotsBody.matchAll(/^\s*sitemap:\s*(\S+)/gim)) entries.push(m[1].trim());
-  entries.push(origin + "/sitemap.xml");
+  entries.push(origin + "/sitemap.xml", origin + "/sitemap_index.xml", origin + "/wp-sitemap.xml");
+  const isProductSub = (u) => /product/i.test(u) && !/(cat|tag|brand|type|categor|coupon|attribute)/i.test(u);
   const seen = new Set();
   for (const entry of entries) {
     if (seen.has(entry)) continue;
@@ -243,13 +256,16 @@ async function sitemapProductUrls(origin, robotsBody, opts) {
     if (!sm.ok) continue;
     const locs = parseLocs(sm.body);
     if (/<sitemapindex/i.test(sm.body)) {
-      // prefer product sub-sitemaps (Shopify: sitemap_products_*), then a couple of others
-      const subs = locs.filter((u) => /product/i.test(u)).concat(locs.filter((u) => !/product/i.test(u))).slice(0, 3);
-      const collected = [];
+      // real product sub-sitemaps first (not taxonomy), then other product-ish, then the rest
+      const subs = locs.filter(isProductSub)
+        .concat(locs.filter((u) => /product/i.test(u) && !isProductSub(u)))
+        .concat(locs.filter((u) => !/product/i.test(u)))
+        .slice(0, 3);
       for (const sub of subs) {
         const s2 = await fetchText(sub, opts);
-        if (s2.ok) collected.push(...parseLocs(s2.body));
-        const found = collected.filter(looksLikeProductUrl);
+        if (!s2.ok) continue;
+        const sublocs = parseLocs(s2.body);
+        const found = isProductSub(sub) ? productUrlsFromList(sublocs, origin) : sublocs.filter(looksLikeProductUrl);
         if (found.length) return found.slice(0, 3);
       }
     } else {
@@ -274,6 +290,32 @@ async function collectionProductUrls(homeBody, origin, opts) {
       const links = findProductLinks(res.body, origin);
       if (links.length) return links.slice(0, 3);
     }
+  }
+  return [];
+}
+// Squarespace renders product grids via JS, but every page exposes a JSON view.
+// Find the store/collection page (common slugs + homepage nav) and read items[].fullUrl.
+async function squarespaceProductUrls(origin, homeBody, opts) {
+  const paths = new Set(["/shop", "/store", "/coffee", "/products", "/menu", "/collections", "/beans", "/buy"]);
+  for (const m of homeBody.matchAll(/href=["'](\/[a-z0-9][a-z0-9\-]{1,30})["']/gi)) {
+    paths.add(m[1].toLowerCase());
+    if (paths.size > 14) break;
+  }
+  let budget = 10;
+  for (const p of paths) {
+    if (budget-- <= 0) break;
+    const res = await fetchText(origin + p + "?format=json", opts);
+    if (!res.ok) continue;
+    let j;
+    try { j = JSON.parse(res.body); } catch { continue; }
+    const items = (j && (j.items || (j.collection && j.collection.items))) || [];
+    const urls = items
+      .map((it) => it && it.fullUrl)
+      .filter((u) => u && !/\/(cart|checkout|account|gift)/i.test(u))
+      .sort((a, b) => Number(MERCH_RE.test(a)) - Number(MERCH_RE.test(b)))
+      .map((u) => absolutize(u, origin))
+      .filter(Boolean);
+    if (urls.length) return urls.slice(0, 3);
   }
   return [];
 }
@@ -431,6 +473,7 @@ export async function scanStore(input, opts = {}) {
   await tryCands([...pjCands, ...homeCands]);
   if (!productUrl) await tryCands(await sitemapProductUrls(origin, robotsRes.body, opts));
   if (!productUrl) await tryCands(await collectionProductUrls(home.body, origin, opts));
+  if (!productUrl && platform === "squarespace") await tryCands(await squarespaceProductUrls(origin, home.body, opts));
 
   if (productUrl) { try { origin = new URL(productUrl).origin; } catch { /* keep */ } }
 
