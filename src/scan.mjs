@@ -17,27 +17,32 @@ const UA =
   "Mozilla/5.0 (compatible; AgentReadyBot/0.1; +https://agentready.dev/bot)";
 
 // ---------- low-level fetch ----------
-async function fetchText(url, { timeout = DEFAULT_TIMEOUT } = {}) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeout);
-  try {
-    const res = await fetch(url, {
-      redirect: "follow",
-      signal: ctrl.signal,
-      headers: { "User-Agent": UA, Accept: "text/html,application/json,*/*" },
-    });
-    const body = await res.text();
-    return {
-      ok: res.ok,
-      status: res.status,
-      finalUrl: res.url || url,
-      headers: res.headers,
-      body,
-    };
-  } catch (err) {
-    return { ok: false, status: 0, finalUrl: url, headers: null, body: "", error: String(err && err.message || err) };
-  } finally {
-    clearTimeout(t);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function fetchText(url, { timeout = DEFAULT_TIMEOUT, retries = 2 } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeout);
+    try {
+      const res = await fetch(url, {
+        redirect: "follow",
+        signal: ctrl.signal,
+        headers: { "User-Agent": UA, Accept: "text/html,application/json,*/*" },
+      });
+      const body = await res.text();
+      // retry transient rate-limit / server errors
+      if ((res.status === 429 || res.status >= 500) && attempt < retries) {
+        await sleep(400 * (attempt + 1));
+        continue;
+      }
+      return { ok: res.ok, status: res.status, finalUrl: res.url || url, headers: res.headers, body };
+    } catch (err) {
+      // transient network error (connection reset / abort) — back off and retry
+      if (attempt < retries) { await sleep(400 * (attempt + 1)); continue; }
+      return { ok: false, status: 0, finalUrl: url, headers: null, body: "", error: String((err && err.message) || err) };
+    } finally {
+      clearTimeout(t);
+    }
   }
 }
 
@@ -181,13 +186,15 @@ function firstOffer(product) {
 function detectPlatform(html, headers) {
   const h = (k) => (headers && headers.get ? (headers.get(k) || "") : "");
   const body = html || "";
-  if (/cdn\.shopify\.com|Shopify\.theme|x-shopify|myshopify\.com/i.test(body) || h("x-shopid") || h("x-shopify-stage"))
+  const cookie = h("set-cookie");
+  if (/cdn\.shopify\.com|\/cdn\/shop\/|Shopify\.theme|myshopify\.com|x-shopify|shopify-features|window\.Shopify/i.test(body) || h("x-shopid") || h("x-shopify-stage") || /_shopify|_secure_session/i.test(cookie) || /Shopify/i.test(h("powered-by")))
     return "shopify";
-  if (/woocommerce|wp-content\/plugins\/woocommerce|wc-block|class="[^"]*woocommerce/i.test(body))
-    return "woocommerce";
+  if (/woocommerce|wp-content\/plugins\/woocommerce|wc-block|class="[^"]*woocommerce/i.test(body)) return "woocommerce";
+  if (/static\.squarespace\.com|squarespace\.com|Static\.SQUARESPACE|data-controller="Commerce/i.test(body)) return "squarespace";
   if (/cdn11\.bigcommerce\.com|bigcommerce/i.test(body)) return "bigcommerce";
-  if (/Magento|mage\/|data-mage-init|static\/version/i.test(body)) return "magento";
-  if (/cdn\.shopify|Shopify/i.test(h("powered-by"))) return "shopify";
+  if (/bigcartel\.com|bigcartel/i.test(body)) return "bigcartel";
+  if (/mage-init|static\/version|"Magento_|\bMagento\b/i.test(body)) return "magento";
+  if (/wixstatic\.com|X-Wix/i.test(body) || h("x-wix-request-id")) return "wix";
   return "custom/unknown";
 }
 
@@ -253,7 +260,7 @@ export async function scanStore(input, opts = {}) {
     fix: https ? "" : "Serve the store over HTTPS — agents and checkout protocols require TLS 1.2+.",
   });
 
-  const platform = detectPlatform(home.body, home.headers);
+  let platform = detectPlatform(home.body, home.headers);
   add({
     id: "platform",
     label: "Platform detected",
@@ -314,33 +321,50 @@ export async function scanStore(input, opts = {}) {
     });
   }
 
-  // 3) find + fetch a product page — try storefront host variants (www + bare), then homepage links
+  // 3) find + fetch a product page — Shopify products.json (any store), homepage links, then sitemap fallback
   let productUrl = null;
   let productsJsonOk = false;
   const productCandidates = [];
-  if (platform === "shopify") {
+  {
     const host = new URL(origin).hostname.replace(/^www\./, "");
     const proto = new URL(origin).protocol;
     const hostCandidates = [...new Set([`${proto}//www.${host}`, `${proto}//${host}`, origin])];
+    // skip gift cards / merch so we sample a representative product
+    const skip = /gift|e-?gift|\bcard\b|sample|sticker|merch|t-?shirt|tee|hoodie|sweat|\bhat\b|cap|beanie|mug|tote|bag-clip|subscription/i;
     let handle = null;
     for (const o of hostCandidates) {
-      const pj = await fetchText(o + "/products.json?limit=1", opts);
+      const pj = await fetchText(o + "/products.json?limit=20", opts);
       if (!pj.ok) continue;
       try {
         const j = JSON.parse(pj.body);
-        if (j && Array.isArray(j.products) && j.products.length && j.products[0].handle) {
+        if (j && Array.isArray(j.products) && j.products.length) {
           productsJsonOk = true;
-          handle = j.products[0].handle;
+          if (platform === "custom/unknown") platform = "shopify"; // products.json is a definitive Shopify signal
+          const pick = j.products.find((p) => p.handle && !skip.test(p.handle)) || j.products.find((p) => p.handle);
+          handle = pick && pick.handle;
           break;
         }
-      } catch { /* not json on this host; try next */ }
+      } catch { /* not shopify json on this host; try next */ }
     }
-    // a handle may be served by one host while schema lives on another (www vs bare) — try both
     if (handle) for (const o of hostCandidates) productCandidates.push(`${o}/products/${handle}`);
   }
   for (const l of findProductLinks(home.body, origin)) {
     if (!productCandidates.includes(l)) productCandidates.push(l);
-    if (productCandidates.length >= 5) break;
+    if (productCandidates.length >= 6) break;
+  }
+  // sitemap fallback for headless / non-Shopify stores
+  if (!productCandidates.length) {
+    const sm = await fetchText(origin + "/sitemap.xml", opts);
+    if (sm.ok) {
+      let locs = [...sm.body.matchAll(/<loc>([^<]+)<\/loc>/gi)].map((m) => m[1].trim());
+      const subProd = locs.find((u) => /\.xml/i.test(u) && /product/i.test(u));
+      if (subProd) {
+        const s2 = await fetchText(subProd, opts);
+        if (s2.ok) locs = [...s2.body.matchAll(/<loc>([^<]+)<\/loc>/gi)].map((m) => m[1].trim());
+      }
+      const prod = locs.find((u) => /\/products?\//i.test(u));
+      if (prod) productCandidates.push(prod);
+    }
   }
   let productRes = null;
   let product = null;

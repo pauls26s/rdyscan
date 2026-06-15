@@ -4,6 +4,29 @@ Audit any e-commerce store for **AI shopping-agent readiness** — the signals t
 
 This is the OSS lead-magnet engine and product seed for AgentReady (see `../DIRECTION.md`).
 
+## Example
+```text
+AgentReady — AI Shopping-Agent Readiness
+Store : https://www.allbirds.com/   Platform: shopify
+SCORE : 91/100  (grade A)
+----------------------------------------------------------------
+PASS [##########]  5/5   Reachable over HTTPS
+PASS [##########] 20/20  AI crawler access (robots.txt)  — all major AI bots allowed
+PASS [#########-] 26/30  Product schema (JSON-LD)         — missing: aggregateRating
+PASS [##########] 15/15  Server-rendered product data
+PASS [##########] 10/10  Product feed / sitemap           — sitemap.xml + products.json
+WARN [#####-----]  5/10  Operational legibility           — shipping policy not linked
+----------------------------------------------------------------
+TOP FIX: publish structured shipping/returns in Offer.shippingDetails / hasMerchantReturnPolicy
+```
+
+## Live snapshot — specialty coffee roasters (28 stores, Jun 2026)
+Batch scan (`node src/batch.mjs urls.txt`) of 28 specialty-coffee storefronts:
+- **21 had a discoverable product page** to audit; 7 were headless/custom with no externally-reachable product page (a readiness signal in itself).
+- **Only ~38% of audited pages had complete, agent-ready schema.**
+- **~29% had a live product page with zero JSON-LD** — invisible to ChatGPT/Gemini shopping.
+- Median readiness ≈ 80/100. *(Snapshot; re-run for current numbers — external scans vary slightly.)*
+
 ## Usage
 ```bash
 node src/cli.mjs <store-url>          # pretty report
@@ -46,6 +69,8 @@ console.log(renderText(report));
 - **Cloudflare AI-block is a flag**, not a confirmation (can't see the bot-specific WAF rule externally).
 - **Detects JSON-LD only.** Stores with `@type:Product` buried in JS state (e.g. brooklinen) score 0 — which is correct for agent discovery, but a future version should say "schema present but not as crawlable JSON-LD" to sharpen the finding.
 - No JS execution — by design (mirrors what non-rendering AI crawlers see).
+- **Discovery gaps on headless/custom stores:** sites without `/products.json` and with JS-rendered homepages may yield no testable product page. This is reported honestly as "no product page discoverable" — **not** counted as confirmed missing schema.
+- **Run-to-run variance / rate-limits:** external scans can hit transient `429`/resets; the scanner retries with backoff, but batch aggregates are a point-in-time snapshot. Space out re-scans of the same host.
 - Next: cheerio parsing, multi-SKU sampling, LLM layer for description-quality + auto-fix generation, Shopify/Woo apps, scheduled monitoring.
 
 ## License

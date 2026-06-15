@@ -14,7 +14,7 @@ const SAMPLE = ["allbirds.com", "gymshark.com", "manduka.com", "brooklinen.com",
 function parseArgs() {
   const a = process.argv.slice(2);
   const file = a.find((x) => !x.startsWith("--"));
-  const conc = Number((a.find((x) => x.startsWith("--concurrency=")) || "").split("=")[1]) || 4;
+  const conc = Number((a.find((x) => x.startsWith("--concurrency=")) || "").split("=")[1]) || 3;
   const outDir = (a.find((x) => x.startsWith("--out=")) || "").split("=")[1] || "out";
   return { file, conc, outDir };
 }
@@ -66,13 +66,17 @@ const csvCell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   });
 
   const ok = rows.filter((r) => r.ok);
+  const audited = ok.filter((r) => r.tested);          // a real product page was evaluated
+  const couldNotAudit = ok.filter((r) => !r.tested);   // no externally-discoverable product page
   const scores = ok.map((r) => r.score);
   const grades = {};
   for (const r of ok) grades[r.grade] = (grades[r.grade] || 0) + 1;
-  const noSchema = ok.filter((r) => r.schema === 0).length;
-  const weakSchema = ok.filter((r) => r.schema < 15).length;
+  const A = audited.length || 1;
+  const noSchema = audited.filter((r) => r.schema === 0).length;          // confirmed: live page, zero JSON-LD
+  const partialSchema = audited.filter((r) => r.schema > 0 && r.schema < 26).length;
+  const fullSchema = audited.filter((r) => r.schema >= 26).length;        // ~complete, agent-ready
   const blockBots = ok.filter((r) => r.crawler < 20).length;
-  const ssrFail = ok.filter((r) => r.ssr === "fail").length;
+  const ssrFail = audited.filter((r) => r.ssr === "fail").length;
   const noFeed = ok.filter((r) => r.feed < 10).length;
   const platforms = {};
   for (const r of ok) platforms[r.platform] = (platforms[r.platform] || 0) + 1;
@@ -85,18 +89,20 @@ const csvCell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   writeFileSync(`${outDir}/results.csv`, csv);
 
   const md = `# Agent-Readiness — batch scan (${new Date().toISOString().slice(0, 10)})
-Scanned **${urls.length}** stores · **${ok.length}** reachable.
+Scanned **${urls.length}** stores · **${ok.length}** reachable · **${audited.length}** had a discoverable product page to audit.
 
-- **Median score:** ${median(scores)}/100
-- **No product JSON-LD at all:** ${pct(noSchema, ok.length)}% (${noSchema}/${ok.length})
-- **Missing / partial schema:** ${pct(weakSchema, ok.length)}%
+- **Median readiness score:** ${median(scores)}/100
+- **Complete, agent-ready schema:** ${pct(fullSchema, A)}% of audited (${fullSchema}/${audited.length})
+- **Partial schema** (missing fields agents compare on): ${pct(partialSchema, A)}% of audited
+- **CONFIRMED no product schema** (live product page, zero JSON-LD): ${pct(noSchema, A)}% of audited (${noSchema}/${audited.length})
+- **No externally-discoverable product page** (headless/custom or blocking — agents may struggle too): ${couldNotAudit.length}/${ok.length}
 - **Blocking >=1 AI crawler:** ${pct(blockBots, ok.length)}%
-- **Product page JS-only (fails AI parsing):** ${pct(ssrFail, ok.length)}%
-- **No proper feed / sitemap:** ${pct(noFeed, ok.length)}%
+- **JS-only product page (fails AI parsing):** ${pct(ssrFail, A)}% of audited
+- **No product feed / sitemap:** ${pct(noFeed, ok.length)}%
 - **Grades:** ${Object.entries(grades).sort().map(([g, n]) => `${g}:${n}`).join("  ")}
 - **Platforms:** ${Object.entries(platforms).map(([p, n]) => `${p}:${n}`).join("  ")}
 
-> **Headline draft:** "I scanned ${ok.length} stores for AI-shopping readiness. ${pct(noSchema, ok.length)}% have **no product schema at all** — invisible to ChatGPT/Gemini shopping. Median readiness: ${median(scores)}/100."
+> **Headline draft (defensible):** "I audited ${audited.length} specialty-coffee product pages for AI-shopping readiness. Only ${pct(fullSchema, A)}% have complete, agent-ready schema; ${pct(noSchema, A)}% have a live product page with ZERO structured data — invisible to ChatGPT/Gemini. Median readiness ${median(scores)}/100."
 `;
   writeFileSync(`${outDir}/summary.md`, md);
   console.log("\n" + md);
